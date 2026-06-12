@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Dungeon Quest Fix</title>
+<style>
+    * {margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-tap-highlight-color: transparent}
+  body {background: #000; color: #eee; font-family: monospace; overflow: hidden}
+  canvas {background: #1a1a1a; display: block; margin: 0 auto; image-rendering: pixelated; border: 2px solid #8b5a2b}
+  #story {background: #111; padding: 10px; text-align: center; font-size: 15px; border-bottom: 2px solid #444; min-height: 50px}
+  #controls {position: fixed; bottom: 20px; width: 100%; display: flex; justify-content: space-between; padding: 0 40px}
+.dpad {display: grid; grid-template: 65px 65px 65px / 65px 65px 65px; gap: 5px}
+.btn {width: 65px; height: 65px; background: #2a2a2a; border: 3px solid #555; border-radius: 12px; color: #ccc; font-size: 22px; font-weight: bold}
+.btn:active {background: #444; transform: scale(0.95)}
+  #up {grid-area: 1 / 2}
+  #left {grid-area: 2 / 1}
+  #right {grid-area: 2 / 3}
+  #down {grid-area: 3 / 2}
+  #aksi {position: fixed; bottom: 85px; right: 40px; width: 85px; height: 85px; background: #ffcc00; border: 4px solid #aa8800; border-radius: 50%; font-weight: bold; color: #000; font-size: 15px}
+  #aksi:active {background: #ffdd44; transform: scale(0.95)}
+  @media (max-width: 500px) {.dpad {grid-template: 55px 55px 55px / 55px 55px 55px}.btn {width: 55px; height: 55px} #aksi {width: 75px; height: 75px; bottom: 75px}}
+</style>
+</head>
+<body>
+<div id="story">Masuk Dungeon Gelap... Tahan tombol buat jalan. Dekati NPC emas & pencet AKSI</div>
+<canvas id="game" width="480" height="360"></canvas>
+
+<div id="controls">
+  <div class="dpad">
+    <button class="btn" id="up">↑</button>
+    <button class="btn" id="left">←</button>
+    <button class="btn" id="right">→</button>
+    <button class="btn" id="down">↓</button>
+  </div>
+  <button id="aksi">AKSI</button>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+const storyBox = document.getElementById('story');
+
+// Audio
+let audioCtx;
+function initAudio() {
+  if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+document.addEventListener('touchstart', initAudio, {once: true});
+
+function playSound(type) {
+  if(!audioCtx) return;
+  let osc = audioCtx.createOscillator();
+  let gain = audioCtx.createGain();
+  osc.connect(gain); gain.connect(audioCtx.destination);
+
+  if(type == 'langkah') {
+    osc.frequency.value = 100;
+    gain.gain.setValueAtTime(0.04, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
+    osc.start(); osc.stop(audioCtx.currentTime + 0.08);
+  }
+  if(type == 'aksi') {
+    osc.frequency.value = 440;
+    gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(660, audioCtx.currentTime + 0.1);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+    osc.start(); osc.stop(audioCtx.currentTime + 0.15);
+  }
+  if(type == 'misi') {
+    [523, 659, 784].forEach((f, i) => {
+      let o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.connect(g); g.connect(audioCtx.destination);
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0, audioCtx.currentTime);
+      g.gain.linearRampToValueAtTime(0.18, audioCtx.currentTime + 0.1 + i*0.1);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.9 + i*0.1);
+      o.start(audioCtx.currentTime + i*0.1); o.stop(audioCtx.currentTime + 1.2 + i*0.1);
+    });
+  }
+  if(type == 'menang') {
+    [523, 659, 784, 1047].forEach((f, i) => {
+      let o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.connect(g); g.connect(audioCtx.destination);
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.22, audioCtx.currentTime + i*0.18);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i*0.18 + 0.6);
+      o.start(audioCtx.currentTime + i*0.18); o.stop(audioCtx.currentTime + i*0.18 + 0.6);
+    });
+  }
+}
+
+let player = {x: 60, y: 180, w: 16, h: 16, speed: 8, langkahTimer: 0};
+
+let missions = [
+  {id: 1, text: "Misi 1: tinggal kalahin tu slime di ujung", done: false, x: 420, y: 80},
+  {id: 2, text: "Misi 2: Kalahin lgi tuh monster , monsternya sama semua", done: false, x: 60, y: 300},
+  {id: 3, text: "Misi 3: kalahin lgi tuh yang terakhir wkwk", done: false, x: 430, y: 280}
+];
+let activeMission = 0;
+let animasi = {aktif: false, frame: 0, x: 0, y: 0};
+
+const playerSprite = [
+  [0,0,0,0,'#aaa','#aaa','#aaa','#aaa','#aaa','#aaa','#aaa','#aaa',0,0,0,0],
+  [0,0,0,'#aaa','#aaa','#aaa','#aaa','#aaa','#aaa','#aaa','#aaa','#aaa','#aaa',0,0,0],
+  [0,0,'#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff',0,0],
+  [0,'#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff',0],
+  ['#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff'],
+  ['#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff'],
+  [0,0,'#aaa','#aaa','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#aaa','#aaa',0,0],
+  [0,0,'#aaa','#aaa','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#aaa','#aaa',0,0],
+  [0,0,0,0,'#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff',0,0,0,0],
+  [0,0,0,0,'#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff',0,0,0,0],
+  [0,0,'#8b4513','#8b4513',0,0,'#4da6ff','#4da6ff','#4da6ff','#4da6ff',0,0,'#8b4513','#8b4513',0,0],
+  [0,'#8b4513','#8b4513','#8b4513',0,'#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff',0,'#8b4513','#8b4513','#8b4513',0],
+  ['#8b4513','#8b4513','#8b4513','#8b4513','#8b4513','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#8b4513','#8b4513','#8b4513','#8b4513','#8b4513'],
+  ['#654321','#654321','#654321','#654321','#654321','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#4da6ff','#654321','#654321','#654321','#654321','#654321'],
+  [0,0,'#654321','#654321','#654321','#654321',0,0,0,0,'#654321','#654321','#654321','#654321',0,0],
+  [0,0,0,'#654321','#654321','#654321',0,0,0,0,'#654321','#654321','#654321',0,0,0]
+];
+
+const npcSprite = [
+  [0,0,0,0,'#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00',0,0,0,0],
+  [0,0,'#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00',0,0],
+  [0,'#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00',0],
+  ['#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00'],
+  ['#ffcc00','#ffcc00','#000','#000','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#000','#000','#ffcc00','#ffcc00','#ffcc00','#ffcc00'],
+  ['#ffcc00','#ffcc00','#000','#000','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#000','#000','#ffcc00','#ffcc00','#ffcc00','#ffcc00'],
+  ['#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00'],
+  ['#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00'],
+  [0,0,'#8b4513','#8b4513','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#8b4513','#8b4513',0,0],
+  [0,'#8b4513','#8b4513','#8b4513',0,'#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00',0,'#8b4513','#8b4513','#8b4513',0],
+  ['#8b4513','#8b4513','#8b4513','#8b4513','#8b4513','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#8b4513','#8b4513','#8b4513','#8b4513','#8b4513'],
+  ['#654321','#654321','#654321','#654321','#654321','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#ffcc00','#654321','#654321','#654321','#654321','#654321'],
+  [0,0,'#654321','#654321','#654321','#654321',0,0,0,0,'#654321','#654321','#654321','#654321',0,0],
+  [0,0,0,'#654321','#654321','#654321',0,0,0,0,'#654321','#654321','#654321',0,0,0],
+  [0,0,0,0,'#654321','#654321',0,0,0,0,'#654321','#654321',0,0,0,0],
+  [0,0,0,0,'#654321','#654321',0,0,0,0,'#654321','#654321',0,0,0,0]
+];
+
+function drawPixel(x, y, sprite) {
+  for(let r=0; r<16; r++) {
+    for(let c=0; c<16; c++) {
+      if(sprite[r][c]) {
+        ctx.fillStyle = sprite[r][c];
+        ctx.fillRect(x+c, y+r, 1, 1);
+      }
+    }
+  }
+}
+
+function drawDungeon() {
+  ctx.fillStyle = '#2a2a2a';
+  ctx.fillRect(0,0,480,360);
+  ctx.fillStyle = '#3d2f1f';
+  for(let x=0; x<480; x+=16) {
+    for(let y=0; y<360; y+=16) {
+      if(x<16 || x>448 || y<16 || y>328) ctx.fillRect(x+1, y+1, 14, 14);
+    }
+  }
+  ctx.fillStyle = 'orange';
+  ctx.fillRect(18, 80, 3, 18);
+  ctx.fillRect(459, 280, 3, 18);
+}
+
+function drawAnimasi() {
+  if(!animasi.aktif) return;
+  animasi.frame++;
+  let f = animasi.frame;
+
+  for(let i=0; i<12; i++) {
+    let angle = (f*6 + i*30) * Math.PI/180;
+    let r = f*2.5;
+    let px = animasi.x + 8 + Math.cos(angle)*r;
+    let py = animasi.y + 8 + Math.sin(angle)*r;
+    ctx.fillStyle = `rgba(255,215,0,${1-f/35})`;
+    ctx.fillRect(px, py, 2, 2);
+  }
+
+  ctx.strokeStyle = `rgba(255,255,0,${1-f/35})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(animasi.x+8, animasi.y+8, f, 0, Math.PI*2);
+  ctx.stroke();
+
+  if(f > 35) {
+    animasi.aktif = false;
+    activeMission++;
+    if(activeMission >= missions.length) playSound('menang');
+  }
+}
+
+// FIX UTAMA: draw dipanggil terus 60fps
+function draw() {
+  ctx.clearRect(0,0,480,360); // hapus layar
+  drawDungeon(); // gambar lantai + dinding dulu
+
+  // gambar NPC misi aktif
+  if(activeMission < missions.length &&!missions[activeMission].done) {
+    drawPixel(missions[activeMission].x, missions[activeMission].y, npcSprite);
+  }
+
+  drawPixel(player.x, player.y, playerSprite); // gambar player terakhir biar di atas
+
+  drawAnimasi(); // animasi di atas semua
+
+  if(activeMission < missions.length) {
+    storyBox.innerText = missions[activeMission].text;
+  } else {
+    storyBox.innerText = "🎉 selamat ,skibidibididobdob Semua misi ditaklukkan!";
+  }
+}
+
+function cekAksi() {
+  if(activeMission >= missions.length || animasi.aktif) return;
+  let m = missions[activeMission];
+  let jarak = Math.sqrt((player.x - m.x)**2 + (player.y - m.y)**2);
+
+  if(jarak < 28) {
+    missions[activeMission].done = true;
+    animasi = {aktif: true, frame: 0, x: m.x, y: m.y};
+    storyBox.innerText = "✅ " + m.text + " SELESAI!";
+    playSound('activeMission');
+    setTimeout(() => playSound('missions'), 250);
+  } else {
+    storyBox.innerText = "Terlalu jauh dari NPC!";
+  }
+}
+
+function gerak(dx, dy) {
+  if(animasi.aktif) return;
+  let oldX = player.x, oldY = player.y;
+  player.x = Math.max(20, Math.min(player.x + dx, 444));
+  player.y = Math.max(20, Math.min(player.y + dy, 324));
+
+  if(oldX!= player.x || oldY!= player.y) {
+    player.langkahTimer++;
+    if(player.langkahTimer % 3 == 0) playSound('langkah');
+  }
+}
+
+// TOMBOL TAHAN
+let keys = {up: false, down: false, left: false, right: false};
+let gameLoop;
+
+function startLoop() {
+  if(gameLoop) return;
+  gameLoop = setInterval(() => {
+    if(keys.up) gerak(0, -player.speed);
+    if(keys.down) gerak(0, player.speed);
+    if(keys.left) gerak(-player.speed, 0);
+    if(keys.right) gerak(player.speed, 0);
+  }, 70); // lebih cepet dikit biar smooth
+}
+
+function stopLoop() {
+  clearInterval(gameLoop);
+  gameLoop = null;
+}
+
+['up','down','left','right'].forEach(id => {
+  let btn = document.getElementById(id);
+
+  btn.addEventListener('touchstart', e => {
+    e.preventDefault();
+    initAudio();
+    keys[id] = true;
+    startLoop();
+  });
+
+  btn.addEventListener('touchend', e => {
+    e.preventDefault();
+    keys[id] = false;
+    if(!keys.up &&!keys.down &&!keys.left &&!keys.right) stopLoop();
+  });
+
+  btn.addEventListener('touchcancel', e => {
+    keys[id] = false;
+    stopLoop();
+  });
+
+  btn.addEventListener('mousedown', e => {
+    e.preventDefault();
+    keys[id] = true;
+    startLoop();
+  });
+  btn.addEventListener('mouseup', e => {
+    keys[id] = false;
+    if(!keys.up &&!keys.down &&!keys.left &&!keys.right) stopLoop();
+  });
+  btn.addEventListener('mouseleave', e => {
+    keys[id] = false;
+    stopLoop();
+  });
+});
+
+document.getElementById('aksi').addEventListener('touchstart', e => {e.preventDefault(); initAudio(); cekAksi()});
+
+// Keyboard PC
+document.addEventListener('keydown', e => {
+  if(e.key == 'ArrowUp') gerak(0,-player.speed);
+  if(e.key == 'ArrowDown') gerak(0,player.speed);
+  if(e.key == 'ArrowLeft') gerak(-player.speed,0);
+  if(e.key == 'ArrowRight') gerak(player.speed,0);
+  if(e.key == ' ') cekAksi();
+});
+
+// LOOP GAMBAR 60FPS - ini kuncinya biar char gak ilang
+setInterval(draw, 16);
+</script>
+</body>
+</html>
